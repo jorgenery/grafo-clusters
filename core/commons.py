@@ -8,6 +8,16 @@ import duckdb
 import zipfile
 import matplotlib.pyplot as plt
 from geopy.distance import great_circle
+from networkx.algorithms import isomorphism
+from networkx.algorithms.similarity import optimize_graph_edit_distance
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+from sklearn.preprocessing import normalize, binarize
+from sklearn.manifold import MDS
+from scipy.spatial.distance import cdist
+from scipy.spatial.distance import cosine, cityblock, jaccard
+from tslearn.metrics import dtw as ts_dtw
 
 
 def detectar_sentido(pontos_info, ponto_a, ponto_b):
@@ -206,10 +216,13 @@ def stun_paradas_por_rota(trips, route_short_name="TODAS"):
 
 
 def rotas_to_grafo(df):
-
-    G = nx.DiGraph()
+    grafos_por_rota = []
     # Agrupar por trip_id para conectar paradas em sequência
     for route_id, grupo in df.groupby("route_id"):
+        G = nx.DiGraph()
+        # Nome da rota (pode adaptar conforme o seu dataset)
+        nome_rota = grupo["route_short_name"].iloc[0]
+        G.graph['nome'] = nome_rota
         grupo = grupo.sort_values(["direction_id", "stop_sequence"])
         for i in range(len(grupo) - 1):
             origem = grupo.iloc[i]
@@ -222,6 +235,7 @@ def rotas_to_grafo(df):
             if origem_id not in G:
                 G.add_node(
                     origem_id,
+                    label=origem_id,
                     stop_name=origem["stop_name"],
                     direction_id=origem["direction_id"],
                     pos=(origem["stop_lat"], origem["stop_lon"]),
@@ -232,6 +246,7 @@ def rotas_to_grafo(df):
             if destino_id not in G:
                 G.add_node(
                     destino_id,
+                    label=destino_id,
                     stop_name=destino["stop_name"],
                     direction_id=destino["direction_id"],
                     pos=(origem["stop_lat"], origem["stop_lon"]),
@@ -249,42 +264,43 @@ def rotas_to_grafo(df):
                 G.add_edge(
                     origem_id,
                     destino_id,
+                    label=origem_id + " -> " + destino_id,
                     route_short_name=origem["route_short_name"],
                     direction_id=origem["direction_id"],
                     route_id=route_id,
                     distancia=distancia,
                     weight=distancia,
                 )
+        grafos_por_rota.append(G)
+    return grafos_por_rota
 
-    return G
 
-
-def show_grafo(G):
+def show_grafo(grafos_por_rota):
     # Para visualizar o grafo, você pode usar o networkx ou outras bibliotecas de visualização
-
-    # Layout para evitar sobreposição
-    pos = nx.spring_layout(G, k=0.15, iterations=20)
-    cor_por_tipo = {
-        0: "green",
-        1: "skyblue",
-    }
-    node_colors = [cor_por_tipo[G.nodes[n]["direction_id"]] for n in G.nodes]
-    edge_colors = [cor_por_tipo[G.edges[n]["direction_id"]] for n in G.edges()]
-    # Tamanho da figura maior e sem labels para não poluir
-    plt.figure(figsize=(12, 10))
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=50)
-    nx.draw_networkx_edges(
-        G,
-        pos,
-        edge_color=edge_colors,
-        arrows=True,
-        arrowstyle="->",
-        connectionstyle="arc3,rad=0.1",
-        width=2,
-    )
-    nx.draw_networkx_labels(G, pos, font_size=8, font_weight="bold")
-    edge_labels = nx.get_edge_attributes(G, "stop_name")
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color="black")
+    for G in grafos_por_rota:
+        # Layout para evitar sobreposição
+        pos = nx.spring_layout(G, k=0.15, iterations=20)
+        cor_por_tipo = {
+            0: "green",
+            1: "skyblue",
+        }
+        node_colors = [cor_por_tipo[G.nodes[n]["direction_id"]] for n in G.nodes]
+        edge_colors = [cor_por_tipo[G.edges[n]["direction_id"]] for n in G.edges()]
+        # Tamanho da figura maior e sem labels para não poluir
+        plt.figure(figsize=(12, 10))
+        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=50)
+        nx.draw_networkx_edges(
+            G,
+            pos,
+            edge_color=edge_colors,
+            arrows=True,
+            arrowstyle="->",
+            connectionstyle="arc3,rad=0.1",
+            width=2,
+        )
+        nx.draw_networkx_labels(G, pos, font_size=8, font_weight="bold")
+        edge_labels = nx.get_edge_attributes(G, "stop_name")
+        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color="black")
 
     plt.axis("off")
     plt.show()
@@ -305,6 +321,11 @@ def carregar_shapes_por_rota(gtfs_path, route_short_name="TODAS"):
         stop_times_path = ler_csv_de_zip(gtfs_path, "stop_times.txt")
         stops_path = ler_csv_de_zip(gtfs_path, "stops.txt")
         shapes_path = ler_csv_de_zip(gtfs_path, "shapes.txt")
+        con.register("routes_path", routes_path)
+        con.register("trips_path", trips_path) 
+        con.register("stop_times_path", stop_times_path)
+        con.register("stops_path", stops_path)
+        con.register("shapes_path", shapes_path)
         query = f"""
             WITH viagens AS (
                 SELECT DISTINCT 
@@ -379,6 +400,7 @@ def carregar_shapes_por_rota(gtfs_path, route_short_name="TODAS"):
     return shapes_rota.reset_index(drop=True)
 
 
+## Adaptar baseado no codigo de 
 def carregar_grafos(arquivo_saida):
     # Carregar o dicionário de grafos de um arquivo pickle
     with open(arquivo_saida, "rb") as arquivo:
