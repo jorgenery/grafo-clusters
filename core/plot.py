@@ -13,6 +13,12 @@ import mpld3
 from mpld3 import plugins
 import pydeck as pdk
 import hashlib
+import random
+from matplotlib.patches import Rectangle
+from collections import defaultdict, Counter, OrderedDict
+import core.measures as measures
+import skfuzzy
+from sklearn.metrics import silhouette_score
 
 
 def plot_matriz_distancias(distancias):
@@ -232,3 +238,238 @@ def desenha_mapa_pydeck(linhas):
     )
 
     return deck
+
+
+def plot_routes_map(routes, type='ngrams', vis_seq=False, vis_pontos=False):
+    # Função para extrair todos os n-gramas (subsequências contínuas)
+    def extract_ngrams(seq, min_len=2):
+        ngrams = []
+        for n in range(len(seq), min_len - 1, -1):
+            for i in range(len(seq) - n + 1):
+                ngrams.append(tuple(seq[i:i + n]))
+        return ngrams
+
+    def lcs(seq1, seq2):
+        dp = [["" for _ in range(len(seq2) + 1)] for _ in range(len(seq1) + 1)]
+        for i in range(1, len(seq1) + 1):
+            for j in range(1, len(seq2) + 1):
+                if seq1[i - 1] == seq2[j - 1]:
+                    dp[i][j] = dp[i - 1][j - 1] + [seq1[i - 1]] if isinstance(dp[i - 1][j - 1], list) else [seq1[i - 1]]
+                else:
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1], key=len)
+        return dp[-1][-1] if isinstance(dp[-1][-1], list) else []
+
+    # Parâmetros
+    df_tudo = pd.concat(routes, ignore_index=True)
+    if type == 'ngrams':
+        # Contar n-gramas em todas as sequências
+        ngram_counter = Counter()
+        seq_to_ngrams = defaultdict(list)
+        route_names = []
+        sequences = []
+        N = 0
+        for rota, grupo in df_tudo.groupby("route_short_name"):
+            route_names.append(rota)
+            N += 1
+            seq = grupo.sort_values(["direction_id", "stop_sequence"])['stop_id'].tolist()
+            sequences.append(seq)
+            ngrams = extract_ngrams(seq)
+            for ng in ngrams:
+                ngram_counter[ng] += 1
+                seq_to_ngrams[tuple(seq)].append(ng)
+        # Selecionar apenas n-gramas que aparecem em mais de uma rota
+        common_ngrams = {ng for ng, count in ngram_counter.items() if count > 1}
+
+        # Ordenar os n-gramas por tamanho e frequência (maiores e mais frequentes primeiro)
+        sorted_ngrams = sorted(
+            list(common_ngrams),
+            key=lambda ng: (-len(ng), -ngram_counter[ng])
+        )
+
+        # Construir ordenamento baseado nos n-gramas
+        # col_used = set()
+        node_to_col = OrderedDict()
+        col_idx = 0
+
+        for ng in sorted_ngrams:
+            can_place = all(n not in node_to_col for n in ng)
+            if can_place:
+                for n in ng:
+                    if n not in node_to_col:
+                        node_to_col[n] = col_idx
+                        col_idx += 1
+
+        # Colocar os demais nós (não participantes de subsequências comuns)
+        for seq in sequences:
+            for n in seq:
+                if n not in node_to_col:
+                    node_to_col[n] = col_idx
+                    col_idx += 1
+    elif type == 'lcs':
+        route_names = []
+        sequences = []
+        N = 0
+        for rota, grupo in df_tudo.groupby("route_short_name"):
+            route_names.append(rota)
+            N += 1
+            seq = grupo.sort_values(["direction_id", "stop_sequence"])['stop_id'].tolist()
+            sequences.append(seq)
+
+        # Encontrar LCS geral entre todas as rotas (acumulativa)
+        lcs_seq = sequences[0]
+        for seq in sequences[1:]:
+            lcs_seq = lcs(lcs_seq, seq)
+            if not lcs_seq:
+                break
+
+        # Construir ordenamento: LCS primeiro, depois o restante
+        ordered_nodes = list(OrderedDict.fromkeys(lcs_seq))  # mantém ordem
+        for seq in sequences:
+            for node in seq:
+                if node not in ordered_nodes:
+                    ordered_nodes.append(node)
+
+        node_to_col = {node: idx for idx, node in enumerate(ordered_nodes)}
+    else:
+        raise ValueError("Tipo de análise não suportado. Use 'ngrams' ou 'lcs'.")
+
+    # Plotagem
+    fig, ax = plt.subplots(figsize=(min(0.25 * len(node_to_col), 30), 0.5 * N))
+    imp = []
+    cores = ['steelblue', 'orange', 'green', 'red', 'purple', 'pink', 'brown', 'gray']
+    for row_idx, seq in enumerate(sequences):
+        k = 0
+        for node in seq:
+            k += 1
+            if k == 1:
+                cor = cores[3]
+            elif k == len(seq) - 1:
+                cor = cores[3]
+            else:
+                cor = cores[0]
+            col_idx = node_to_col[node]
+            if (col_idx, row_idx) not in imp:                            
+                ax.add_patch(Rectangle((col_idx, -row_idx), 1, 1, color=cor))
+                if vis_seq:                    
+                    ax.text(col_idx + 0.3, -row_idx + 0.3, str(k), ha='center', va='center', fontsize=8, color='white')
+                imp.append((col_idx, row_idx))
+
+    # Eixos
+    ax.set_xlim(0, len(node_to_col))
+    ax.set_ylim(-N, 1)
+    if vis_pontos:
+        ax.set_xticks([i for i in range(len(node_to_col))])
+        ax.set_xticklabels(node_to_col, fontsize=8, rotation=90)
+    else:
+        ax.set_xticks([])
+    ax.set_yticks([-i for i in range(N)])
+    ax.set_yticklabels(route_names, fontsize=8)
+    ax.set_title("Sequências Comuns", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
+def get_kmeans_inertias(lista_grafos, max_clusters=10, similarity_metrics=None):
+    if similarity_metrics is None:
+        raise ValueError("similarity_metrics deve ser uma lista de funções de similaridade.")
+
+    inertia_results = {}
+    n_graphs = len(lista_grafos)
+
+    for metric in similarity_metrics:
+        inertia = []
+        X_sim = measures.matriz_similaridade(lista_grafos, func_similaridade=similarity_metrics[metric])
+        for k in range(1, min(max_clusters, n_graphs) + 1):
+            kmeans = KMeans(n_clusters=k)
+            kmeans.fit(X_sim)
+            inertia.append(kmeans.inertia_)
+
+        inertia_results[metric if isinstance(metric, str) else metric.__name__] = inertia
+    return inertia_results
+
+
+def get_skfuzzy_silueta(lista_grafos, max_clusters=10, min_clusters=2, similarity_metrics=None):
+    if max_clusters >= len(lista_grafos):
+        max_clusters = len(lista_grafos) - 1
+    # Inicializar a semente
+    np.random.seed(42)
+    for metric in similarity_metrics:
+        skfuzzy_scores = {}
+        siluetas_score = []
+        fpc_scores = []
+        melhor_score = -np.inf
+        melhor_k = None
+        X_sim = measures.matriz_similaridade(lista_grafos, func_similaridade=similarity_metrics[metric])
+        list_clusters = []
+        for k in range(min_clusters, max_clusters + 1):
+            c, m, _, d, jm, p, fpc = skfuzzy.cmeans(X_sim.T, k, 1.5, error=0.005, maxiter=1000, init=None)
+            try:
+                fpc_scores.append(fpc)
+                silueta = silhouette_score(X_sim, m.argmax(axis=0))
+                siluetas_score.append(silueta)
+                list_clusters.append(m)
+                # Salvar o melhor score e a matriz de pertinência correspondente
+                if fpc > melhor_score:
+                    melhor_score = fpc
+                    melhor_k = m
+
+            except Exception as e:
+                print(f"Erro ao calcular o Silhouette para {k} clusters: {e}")
+        skfuzzy_scores[metric] = [siluetas_score, fpc_scores, list_clusters, melhor_score, melhor_k]
+    return skfuzzy_scores
+
+
+# Função para determinar o número ideal de clusters usando o método do cotovelo
+def elbow_method_kmeans(lista_grafos, ncols=3, max_clusters=10, similarity_metrics=None):    
+    inertias = get_kmeans_inertias(lista_grafos, max_clusters, similarity_metrics)
+    n_graphs = len(lista_grafos)
+    num_metrics = len(similarity_metrics)
+
+    # Definindo um layout de 2 linhas e 3 colunas
+    nrows = (num_metrics // ncols) + (num_metrics % ncols > 0)  # Calcula o número de linhas necessário
+
+    # Criando os subgráficos
+    fig, axs = plt.subplots(nrows, ncols, figsize=(15, 10))
+
+    # Desempacotando o array de subgráficos para um formato mais fácil de usar
+    axs = axs.flatten()
+
+    cluster_counts = range(1, min(max_clusters, n_graphs) + 1)
+
+    # Plotando os gráficos
+    for i, metric in enumerate(similarity_metrics):
+        axs[i].plot(cluster_counts, inertias[metric], marker='o')
+        axs[i].set_title(f'Métrica: {metric}')
+        axs[i].set_xlabel('Número de Clusters')
+
+    # Ajustando o layout
+    plt.tight_layout()
+    plt.show()
+
+
+def elbow_method_fuzzy(lista_grafos, ncols=3, max_clusters=10, similarity_metrics=None):    
+    skfuzzy_scores = get_skfuzzy_silueta(lista_grafos, max_clusters, similarity_metrics)
+    n_graphs = len(lista_grafos)
+    num_metrics = len(similarity_metrics)
+
+    # Definindo um layout de 2 linhas e 3 colunas
+    nrows = (num_metrics // ncols) + (num_metrics % ncols > 0)  # Calcula o número de linhas necessário
+
+    # Criando os subgráficos
+    fig, axs = plt.subplots(nrows, ncols, figsize=(15, 10))
+
+    # Desempacotando o array de subgráficos para um formato mais fácil de usar
+    axs = axs.flatten()
+
+    cluster_counts = range(1, min(max_clusters, n_graphs) + 1)
+
+    # Plotando os gráficos
+    for i, metric in enumerate(similarity_metrics):
+        axs[i].plot(cluster_counts, skfuzzy_scores[metric][0], marker='o')
+        axs[i].plot(cluster_counts, skfuzzy_scores[metric][1], marker='o')
+        axs[i].set_title(f'Métrica: {metric}')
+        axs[i].set_xlabel('Número de Clusters')
+
+    # Ajustando o layout
+    plt.tight_layout()
+    plt.show()
