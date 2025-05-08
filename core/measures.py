@@ -17,6 +17,100 @@ from scipy.spatial.distance import cdist
 from scipy.spatial.distance import cosine, cityblock, jaccard
 from tslearn.metrics import dtw as ts_dtw
 import Levenshtein as lev
+from geopy.distance import geodesic
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
+
+
+# Cosine Similarity
+def cosine_similarity(g1, g2):
+    # Transforma os nós dos grafos em "documentos" de texto
+    doc1 = ' '.join(str(node) for node in g1.nodes)
+    doc2 = ' '.join(str(node) for node in g2.nodes)
+
+    # Vetorização com presença de nós
+    vectorizer = CountVectorizer(binary=True)
+    vectors = vectorizer.fit_transform([doc1, doc2]).toarray()
+
+    # Similaridade cosseno entre os vetores
+    sim = sklearn_cosine_similarity([vectors[0]], [vectors[1]])[0][0]
+    return sim
+
+
+# Distância Geodésica
+def geodesic_distance(g1, g2):
+    # Calcula a distância geodésica entre os grafos considerando os menores caminhos entre os nós
+    def centroide(g):
+        latitudes = [g.nodes[coord]['lat'] for coord in g.nodes]
+        longitudes = [g.nodes[coord]['lon'] for coord in g.nodes]
+        return (sum(latitudes) / len(latitudes), sum(longitudes) / len(longitudes))
+    
+    centroide1 = centroide(g1)
+    centroide2 = centroide(g2)
+    return great_circle(centroide1, centroide2).kilometers
+
+
+# Distância ponderada
+def weighted_distance(g1, g2):
+    dist_total = 0
+    pares_comparados = 0
+
+    for node1 in g1.nodes():
+        for node2 in g1.nodes():
+            if node1 == node2:
+                continue
+
+            try:
+                path_length_g1 = nx.shortest_path_length(g1, source=node1, target=node2, weight='weight')
+            except nx.NetworkXNoPath:
+                continue
+
+            try:
+                coord1 = (g1.nodes[node1]['lat'], g1.nodes[node1]['lon'])
+                coord2 = (g1.nodes[node2]['lat'], g1.nodes[node2]['lon'])
+            except KeyError:
+                continue
+
+            try:
+                closest_node1 = min(g2.nodes, key=lambda x: great_circle(coord1, (g2.nodes[x]['lat'], g2.nodes[x]['lon'])).meters)
+                closest_node2 = min(g2.nodes, key=lambda x: great_circle(coord2, (g2.nodes[x]['lat'], g2.nodes[x]['lon'])).meters)
+            except (KeyError, ValueError):
+                continue
+
+            try:
+                path_length_g2 = nx.shortest_path_length(g2, source=closest_node1, target=closest_node2, weight='weight')
+            except nx.NetworkXNoPath:
+                continue
+
+            dist_total += abs(path_length_g1 - path_length_g2)
+            pares_comparados += 1
+
+    if pares_comparados == 0:
+        return float('inf')
+    
+    return dist_total / pares_comparados
+
+
+
+# Distância de Caminho (Path Distance)
+def path_distance(g1, g2):
+   # Verifica nós em comum
+    common_nodes = set(g1.nodes()).intersection(set(g2.nodes()))
+    
+    if not common_nodes:
+        return float('inf')  # Nenhum nó em comum, distância infinita
+
+    dist = 0
+    for node in common_nodes:
+        lengths_g1 = nx.single_source_shortest_path_length(g1, node)
+        lengths_g2 = nx.single_source_shortest_path_length(g2, node)
+        
+        # Soma diferenças apenas nos nós também presentes no outro grafo
+        shared_targets = set(lengths_g1).intersection(lengths_g2)
+        for target in shared_targets:
+            dist += abs(lengths_g1[target] - lengths_g2[target])
+    
+    return dist
 
 
 # Função para calcular o número mínimo de operações (adição, remoção, substituição de nós ou arestas)
@@ -103,12 +197,12 @@ def subgraph_matching(g1, g2):
     return nx.algorithms.isomorphism.GraphMatcher(g1, g2).subgraph_is_isomorphic()
 
 
-def cne_similarity(rota1, rota2):
+def cne_similarity(g1, g2):
     """ 
     Calcula a similaridade entre duas rotas com base nos nós comuns.
     """
-    nodes1 = set(rota1.nos)
-    nodes2 = set(rota2.nos)
+    nodes1 = set(g1.nodes)
+    nodes2 = set(g2.nodes)
     common_nodes = nodes1 & nodes2
     max_nodes = max(len(nodes1), len(nodes2))
     total_similarity = len(common_nodes)
@@ -132,7 +226,7 @@ class DTWDistance:
 
         return R * c  # Retorna a distância em km
 
-    def calculate(self, route1, route2):
+    def calculate(self, g1, g2):
         """
         Calcula a distância DTW entre duas rotas de pontos geográficos.
 
@@ -140,26 +234,58 @@ class DTWDistance:
         :param route2: np.array com shape (M, 2) - Segunda rota (lat, lon)
         :return: Distância DTW entre as rotas
         """
-        distance, path = fastdtw(route1, route2, dist=self._calc)
+        distance, path = fastdtw(g1, g2, dist=self._calc)
         return distance
 
 
-class DiscreteFrechetDistance:
-    def calculate(self, curve1, curve2):
-        n, m = len(curve1), len(curve2)
-        dp = np.zeros((n, m))
-        dp[0, 0] = np.linalg.norm(curve1[0] - curve2[0])
-        for i in range(1, n):
-            dp[i, 0] = max(dp[i - 1, 0], np.linalg.norm(curve1[i] - curve2[0]))
+def safe_diameter(g):
+    if not nx.is_strongly_connected(g):
+        return float('inf')  # Ou algum valor default, ou pule esse par
+    return nx.diameter(g)
+
+
+# Earth Mover’s Distance (EMD)
+def emd_distance(g1, g2):
+    # Aproximação da distância de Earth Mover (EMD) usando o comprimento das distâncias
+    d1 = safe_diameter(g1)
+    d2 = safe_diameter(g2)
+    if float('inf') in (d1, d2):
+        return 0  # Similaridade nula se não for possível calcular
+    return d1 - d2  # Exemplo simplificado
+
+
+def diameter_similarity(g1, g2):    
+    d1 = safe_diameter(g1)
+    d2 = safe_diameter(g2)
+    if float('inf') in (d1, d2):
+        return 0  # Similaridade nula se não for possível calcular
+    return 1 - abs(d1 - d2) / max(d1, d2)
+
+
+def frechet_similarity(g1, g2):
+    """
+    Calcula a similaridade de Frechet entre duas curvas.
+    """
+    curve1 = extract_coord_sequence(g1)
+    curve2 = extract_coord_sequence(g2)
+    return frechet_distance(curve1, curve2)
+
+
+def frechet_distance(curve1, curve2):
+    n, m = len(curve1), len(curve2)
+    dp = np.zeros((n, m))
+    dp[0, 0] = np.linalg.norm(curve1[0] - curve2[0])
+    for i in range(1, n):
+        dp[i, 0] = max(dp[i - 1, 0], np.linalg.norm(curve1[i] - curve2[0]))
+    for j in range(1, m):
+        dp[0, j] = max(dp[0, j - 1], np.linalg.norm(curve1[0] - curve2[j]))
+    for i in range(1, n):
         for j in range(1, m):
-            dp[0, j] = max(dp[0, j - 1], np.linalg.norm(curve1[0] - curve2[j]))
-        for i in range(1, n):
-            for j in range(1, m):
-                dp[i, j] = max(
-                    min(dp[i - 1, j], dp[i, j - 1], dp[i - 1, j - 1]),
-                    np.linalg.norm(curve1[i] - curve2[j]),
-                )
-        return dp[-1, -1]
+            dp[i, j] = max(
+                min(dp[i - 1, j], dp[i, j - 1], dp[i - 1, j - 1]),
+                np.linalg.norm(curve1[i] - curve2[j]),
+            )
+    return dp[-1, -1]
 
 
 ## Adaptar para function injection
@@ -183,6 +309,7 @@ def matriz_similaridade(lista_grafos, func_similaridade):
                 sim = 1  # Similaridade máxima para o mesmo grafo
             else:
                 sim = func_similaridade(g[l1], g[l2])
+                sim = 0.0 if np.isnan(sim) else sim  # trata NaN como 0
             similaridade_matrix[l1, l2] = sim
             similaridade_matrix[l2, l1] = sim  # Matriz simétrica
 
@@ -305,3 +432,26 @@ def levenshtein_similarity(g1, g2):
     dist = lev.distance(s1, s2)
     max_len = max(len(s1), len(s2))
     return dist / max_len if max_len > 0 else 0
+
+
+# Função principal para calcular todas as distâncias entre dois grafos
+def calculate_all_distances(graph1, graph2):
+    distances = {
+        'Geodesic Distance': geodesic_distance(graph1, graph2),
+        'Weighted Distance': weighted_distance(graph1, graph2),
+        'Graph Diameter': diameter_similarity(graph1, graph2),
+        'Frechet Distance': frechet_similarity(graph1, graph2),
+        'DTW Distance': dtw_similarity(graph1, graph2),
+        'Subgraph Similarity': subgraph_similarity(graph1, graph2),
+        'LCS Distance': lcs_similarity(graph1, graph2),
+        'Graph Edit Distance': distancia_edit(graph1, graph2),
+        'Levenshtein Distance': levenshtein_similarity(graph1, graph2),
+        'Cosine Similarity': cosine_similarity(graph1, graph2),
+        'Jaccard Similarity': jaccard_similarity(graph1, graph2),
+        'EMD Distance': emd_distance(graph1, graph2),
+        'Path Distance': path_distance(graph1, graph2),
+        'Graph Kernel': graph_kernel(graph1, graph2),
+        'Similarity Haversine': similaridade_grafos(graph1, graph2),
+        'CNE Similarity': cne_similarity(graph1, graph2),
+    }
+    return distances

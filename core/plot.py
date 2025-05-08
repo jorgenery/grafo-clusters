@@ -240,6 +240,119 @@ def desenha_mapa_pydeck(linhas):
     return deck
 
 
+def plot_routes_map_v2(routes, type='ngrams', vis_seq=False, vis_pontos=False):
+    def extract_ngrams(seq, min_len=2):
+        ngrams = []
+        for n in range(len(seq), min_len - 1, -1):
+            for i in range(len(seq) - n + 1):
+                ngrams.append(tuple(seq[i:i + n]))
+        return ngrams
+
+    def lcs(seq1, seq2):
+        dp = [["" for _ in range(len(seq2) + 1)] for _ in range(len(seq1) + 1)]
+        for i in range(1, len(seq1) + 1):
+            for j in range(1, len(seq2) + 1):
+                if seq1[i - 1] == seq2[j - 1]:
+                    dp[i][j] = dp[i - 1][j - 1] + [seq1[i - 1]] if isinstance(dp[i - 1][j - 1], list) else [seq1[i - 1]]
+                else:
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1], key=len)
+        return dp[-1][-1] if isinstance(dp[-1][-1], list) else []
+
+    # Concatenar todos os dados
+    df_tudo = pd.concat(routes, ignore_index=True)
+
+    # Verifica se a coluna 'clusters' existe para ordenação
+    if 'clusters' in df_tudo.columns:
+        route_order = df_tudo[['route_short_name', 'clusters']].drop_duplicates().sort_values('clusters')
+        route_names = route_order['route_short_name'].tolist()
+        route_to_cluster = dict(zip(route_order['route_short_name'], route_order['clusters']))
+    else:
+        route_names = df_tudo['route_short_name'].unique().tolist()
+        route_to_cluster = {r: 0 for r in route_names}  # fallback: todos no cluster 0
+
+    N = len(route_names)
+    sequences = []
+    for rota in route_names:
+        grupo = df_tudo[df_tudo['route_short_name'] == rota]
+        seq = grupo.sort_values(["direction_id", "stop_sequence"])['stop_id'].tolist()
+        sequences.append(seq)
+
+    # Construção do ordenamento dos nós
+    if type == 'ngrams':
+        ngram_counter = Counter()
+        seq_to_ngrams = defaultdict(list)
+
+        for seq in sequences:
+            ngrams = extract_ngrams(seq)
+            for ng in ngrams:
+                ngram_counter[ng] += 1
+                seq_to_ngrams[tuple(seq)].append(ng)
+
+        common_ngrams = {ng for ng, count in ngram_counter.items() if count > 1}
+        sorted_ngrams = sorted(list(common_ngrams), key=lambda ng: (-len(ng), -ngram_counter[ng]))
+
+        node_to_col = OrderedDict()
+        col_idx = 0
+        for ng in sorted_ngrams:
+            if all(n not in node_to_col for n in ng):
+                for n in ng:
+                    if n not in node_to_col:
+                        node_to_col[n] = col_idx
+                        col_idx += 1
+        for seq in sequences:
+            for n in seq:
+                if n not in node_to_col:
+                    node_to_col[n] = col_idx
+                    col_idx += 1
+    elif type == 'lcs':
+        lcs_seq = sequences[0]
+        for seq in sequences[1:]:
+            lcs_seq = lcs(lcs_seq, seq)
+            if not lcs_seq:
+                break
+        ordered_nodes = list(OrderedDict.fromkeys(lcs_seq))
+        for seq in sequences:
+            for node in seq:
+                if node not in ordered_nodes:
+                    ordered_nodes.append(node)
+        node_to_col = {node: idx for idx, node in enumerate(ordered_nodes)}
+    else:
+        raise ValueError("Tipo de análise não suportado. Use 'ngrams' ou 'lcs'.")
+
+    # Cores por cluster
+    unique_clusters = sorted(set(route_to_cluster.values()))
+    color_map = {cl: plt.cm.tab10(i % 10) for i, cl in enumerate(unique_clusters)}
+
+    # Plotagem
+    fig, ax = plt.subplots(figsize=(min(0.25 * len(node_to_col), 30), 0.5 * N))
+    imp = set()
+
+    for row_idx, (rota, seq) in enumerate(zip(route_names, sequences)):
+        cluster = route_to_cluster.get(rota, 0)
+        color = color_map[cluster]
+
+        for k, node in enumerate(seq):
+            col_idx = node_to_col[node]
+            if (col_idx, row_idx) not in imp:
+                ax.add_patch(Rectangle((col_idx, -row_idx), 1, 1, color=color))
+                if vis_seq:
+                    ax.text(col_idx + 0.3, -row_idx + 0.3, str(k+1), ha='center', va='center', fontsize=8, color='white')
+                imp.add((col_idx, row_idx))
+
+    # Eixos
+    ax.set_xlim(0, len(node_to_col))
+    ax.set_ylim(-N, 1)
+    if vis_pontos:
+        ax.set_xticks(range(len(node_to_col)))
+        ax.set_xticklabels(list(node_to_col.keys()), fontsize=8, rotation=90)
+    else:
+        ax.set_xticks([])
+    ax.set_yticks([-i for i in range(N)])
+    ax.set_yticklabels(route_names, fontsize=8)
+    ax.set_title("Sequências Comuns por Cluster", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
 def plot_routes_map(routes, type='ngrams', vis_seq=False, vis_pontos=False):
     # Função para extrair todos os n-gramas (subsequências contínuas)
     def extract_ngrams(seq, min_len=2):
