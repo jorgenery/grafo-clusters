@@ -262,10 +262,10 @@ def plot_routes_map_v2(routes, type='ngrams', vis_seq=False, vis_pontos=False):
     df_tudo = pd.concat(routes, ignore_index=True)
 
     # Verifica se a coluna 'clusters' existe para ordenação
-    if 'clusters' in df_tudo.columns:
-        route_order = df_tudo[['route_short_name', 'clusters']].drop_duplicates().sort_values('clusters')
+    if 'cluster' in df_tudo.columns:
+        route_order = df_tudo[['route_short_name', 'cluster']].drop_duplicates().sort_values('cluster')
         route_names = route_order['route_short_name'].tolist()
-        route_to_cluster = dict(zip(route_order['route_short_name'], route_order['clusters']))
+        route_to_cluster = dict(zip(route_order['route_short_name'], route_order['cluster']))
     else:
         route_names = df_tudo['route_short_name'].unique().tolist()
         route_to_cluster = {r: 0 for r in route_names}  # fallback: todos no cluster 0
@@ -351,7 +351,8 @@ def plot_routes_map_v2(routes, type='ngrams', vis_seq=False, vis_pontos=False):
     ax.set_yticklabels(route_names, fontsize=8)
     ax.set_title("Sequências Comuns por Cluster", fontsize=14)
     plt.tight_layout()
-    plt.show()
+    return plt
+
 
 def plot_routes_map(routes, type='ngrams', vis_seq=False, vis_pontos=False):
     # Função para extrair todos os n-gramas (subsequências contínuas)

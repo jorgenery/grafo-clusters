@@ -439,10 +439,10 @@ def calculate_all_distances(graph1, graph2):
     distances = {
         'Geodesic Distance': geodesic_distance(graph1, graph2),
         'Weighted Distance': weighted_distance(graph1, graph2),
-        'Graph Diameter': diameter_similarity(graph1, graph2),
+        # 'Graph Diameter': diameter_similarity(graph1, graph2),
         'Frechet Distance': frechet_similarity(graph1, graph2),
         'DTW Distance': dtw_similarity(graph1, graph2),
-        'Subgraph Similarity': subgraph_similarity(graph1, graph2),
+        # 'Subgraph Similarity': subgraph_similarity(graph1, graph2),
         'LCS Distance': lcs_similarity(graph1, graph2),
         'Graph Edit Distance': distancia_edit(graph1, graph2),
         'Levenshtein Distance': levenshtein_similarity(graph1, graph2),
